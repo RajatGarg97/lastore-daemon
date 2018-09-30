@@ -19,8 +19,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/codegangsta/cli"
+	"net/http"
 	"os"
+	"time"
+
+	"github.com/codegangsta/cli"
 	"pkg.deepin.io/lib/utils"
 )
 
@@ -43,6 +46,11 @@ var CMDUpdater = cli.Command{
 			Name:  "output,o",
 			Value: "/dev/stdout",
 			Usage: "the file to write",
+		},
+		cli.StringFlag{
+			Name:  "mirrors-url",
+			Value: "",
+			Usage: "",
 		},
 	},
 }
@@ -73,6 +81,9 @@ func MainUpdater(c *cli.Context) {
 		GenerateUpdateInfos(fpath)
 	case "mirrors":
 		err = GenerateMirrors(repo, fpath)
+	case "unpublished-mirrors":
+		url := c.String("mirrors-url")
+		err = GenerateUnpublishedMirrors(url, fpath)
 	default:
 		cli.ShowCommandHelp(c, "update")
 		return
@@ -89,6 +100,7 @@ func main() {
 	utils.UnsetEnv("LC_MESSAGES")
 	utils.UnsetEnv("LANG")
 
+	http.DefaultClient.Timeout = 60 * time.Second
 	app := cli.NewApp()
 	app.Name = "lastore-tools"
 	app.Usage = "help building dstore system."

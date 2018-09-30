@@ -19,9 +19,11 @@ package system
 
 import (
 	"errors"
+	"fmt"
 )
 
 const VarLibDir = "/var/lib/lastore"
+const DefaultMirrorsUrl = "http://packages.deepin.com/mirrors/community.json"
 
 type Status string
 
@@ -44,6 +46,14 @@ const (
 	PrepareDistUpgradeJobType = "prepare_dist_upgrade"
 	UpdateSourceJobType       = "update_source"
 	CleanJobType              = "clean"
+	FixErrorJobType           = "fix_error"
+)
+
+const (
+	ErrTypeDpkgInterrupted    = "dpkgInterrupted"
+	ErrTypeDependenciesBroken = "dependenciesBroken"
+	ErrTypeUnknown            = "unknown"
+	ErrTypeInvalidSourcesList = "invalidSourceList"
 )
 
 type JobProgressInfo struct {
@@ -52,6 +62,8 @@ type JobProgressInfo struct {
 	Description string
 	Status      Status
 	Cancelable  bool
+	Error       *JobError
+	FatalError  bool
 }
 
 type UpgradeInfo struct {
@@ -84,13 +96,40 @@ type System interface {
 	Download(jobId string, packages []string) error
 	Install(jobId string, packages []string, environ map[string]string) error
 	Remove(jobId string, packages []string, environ map[string]string) error
-
 	DistUpgrade(jobId string, environ map[string]string) error
-
 	UpdateSource(jobId string) error
 	Clean(jobId string) error
-
 	Abort(jobId string) error
-
 	AttachIndicator(Indicator)
+	FixError(jobId string, errType string, environ map[string]string) error
+}
+
+type PkgSystemError struct {
+	Type   string
+	Detail string
+}
+
+func (e *PkgSystemError) GetType() string {
+	return "PkgSystemError::" + e.Type
+}
+
+func (e *PkgSystemError) GetDetail() string {
+	return e.Detail
+}
+
+func (e *PkgSystemError) Error() string {
+	return fmt.Sprintf("PkgSystemError Type:%s, Detail: %s", e.Type, e.Detail)
+}
+
+type JobError struct {
+	Type   string
+	Detail string
+}
+
+func (e *JobError) GetType() string {
+	return "JobError::" + e.Type
+}
+
+func (e *JobError) GetDetail() string {
+	return e.Detail
 }

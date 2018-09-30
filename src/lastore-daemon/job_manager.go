@@ -86,7 +86,7 @@ func (jm *JobManager) CreateJob(jobName, jobType string, packages []string, envi
 	if job := jm.findJobByType(jobType, packages); job != nil {
 		switch job.Status {
 		case system.FailedStatus, system.PausedStatus:
-			return job, jm.MarkStart(job.Id)
+			return job, jm.markStart(job)
 		default:
 			return job, nil
 		}
@@ -120,6 +120,11 @@ func (jm *JobManager) CreateJob(jobName, jobType string, packages []string, envi
 
 	case system.CleanJobType:
 		job = NewJob(jm.service, genJobId(jobType), jobName, packages, jobType, LockQueue, environ)
+	case system.FixErrorJobType:
+		errType := packages[0]
+		jobId := jobType + "_" + errType
+		job = NewJob(jm.service, jobId, jobName, packages, jobType,
+			LockQueue, environ)
 	default:
 		return nil, system.NotSupportError
 	}
@@ -128,31 +133,38 @@ func (jm *JobManager) CreateJob(jobName, jobType string, packages []string, envi
 	if err := jm.addJob(job); err != nil {
 		return nil, err
 	}
-	return job, jm.MarkStart(job.Id)
+	return job, jm.markStart(job)
 }
 
-// MarkStart transition the Job status to ReadyStatus
-// and move the it to the head of queue.
-func (jm *JobManager) MarkStart(jobId string) error {
+func (jm *JobManager) markStart(job *Job) error {
 	jm.markDirty()
 
-	job := jm.findJobById(jobId)
-	if job == nil {
-		return system.NotFoundError("MarkStart " + jobId)
-	}
-
+	job.PropsMu.Lock()
 	if job.Status != system.ReadyStatus {
 		err := TransitionJobState(job, system.ReadyStatus)
 		if err != nil {
+			job.PropsMu.Unlock()
 			return err
 		}
 	}
+	job.PropsMu.Unlock()
 
 	queue, ok := jm.queues[job.queueName]
 	if !ok {
 		return system.NotFoundError("MarkStart in queues" + job.queueName)
 	}
-	return queue.Raise(jobId)
+	return queue.Raise(job.Id)
+}
+
+// MarkStart transition the Job status to ReadyStatus
+// and move the it to the head of queue.
+func (jm *JobManager) MarkStart(jobId string) error {
+	job := jm.findJobById(jobId)
+	if job == nil {
+		return system.NotFoundError("MarkStart " + jobId)
+	}
+
+	return jm.markStart(job)
 }
 
 // CleanJob transition the Job status to EndStatus,
@@ -167,7 +179,7 @@ func (jm *JobManager) CleanJob(jobId string) error {
 	defer job.PropsMu.Unlock()
 
 	if job.Cancelable && job.Status == system.RunningStatus {
-		err := jm.PauseJob(jobId)
+		err := jm.pauseJob(job)
 		if err != nil {
 			return err
 		}
@@ -179,12 +191,7 @@ func (jm *JobManager) CleanJob(jobId string) error {
 	return TransitionJobState(job, system.EndStatus)
 }
 
-// PauseJob try aborting the job and transition the status to PauseStatus
-func (jm *JobManager) PauseJob(jobId string) error {
-	job := jm.findJobById(jobId)
-	if job == nil {
-		return system.NotFoundError("PauseJob jobId")
-	}
+func (jm *JobManager) pauseJob(job *Job) error {
 	switch job.Status {
 	case system.PausedStatus:
 		log.Warnf("Try pausing a pasued Job %v\n", job)
@@ -197,6 +204,18 @@ func (jm *JobManager) PauseJob(jobId string) error {
 	}
 
 	return TransitionJobState(job, system.PausedStatus)
+}
+
+// PauseJob try aborting the job and transition the status to PauseStatus
+func (jm *JobManager) PauseJob(jobId string) error {
+	job := jm.findJobById(jobId)
+	if job == nil {
+		return system.NotFoundError("PauseJob jobId")
+	}
+	job.PropsMu.Lock()
+	err := jm.pauseJob(job)
+	job.PropsMu.Unlock()
+	return err
 }
 
 // Dispatch transition Job status in Job Queues
@@ -217,9 +236,10 @@ func (jm *JobManager) dispatch() {
 
 			jm.addJob(job)
 
-			jm.MarkStart(job.Id)
-
+			jm.markStart(job)
+			job.PropsMu.RLock()
 			job.notifyAll()
+			job.PropsMu.RUnlock()
 		}
 	}
 
@@ -261,14 +281,37 @@ func (jm *JobManager) sendNotify() {
 func (jm *JobManager) startJobsInQueue(queue *JobQueue) {
 	jobs := queue.PendingJobs()
 	for _, job := range jobs {
-		if job.Status == system.FailedStatus {
-			jm.MarkStart(job.Id)
+		job.PropsMu.RLock()
+		jobStatus := job.Status
+		job.PropsMu.RUnlock()
+
+		if jobStatus == system.FailedStatus {
+			job.retry--
+			jm.markStart(job)
 			log.Infof("Retry failed Job %v\n", job)
 		}
+
 		err := StartSystemJob(jm.system, job)
 		if err != nil {
+			job.PropsMu.Lock()
 			TransitionJobState(job, system.FailedStatus)
+			job.PropsMu.Unlock()
 			log.Errorf("StartSystemJob failed %v :%v\n", job, err)
+
+			pkgSysErr, ok := err.(*system.PkgSystemError)
+			if ok {
+				// do not retry job
+				job.retry = 0
+				job.PropsMu.Lock()
+				job.setError(pkgSysErr)
+				job.emitPropChangedStatus(job.Status)
+				job.PropsMu.Unlock()
+			} else if job.retry == 0 {
+				job.setError(&system.JobError{
+					Type:   "unknown",
+					Detail: "failed to start system job: " + err.Error(),
+				})
+			}
 		}
 	}
 }

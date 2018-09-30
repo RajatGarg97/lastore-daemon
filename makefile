@@ -5,9 +5,10 @@ GoPath := GOPATH=${pwd}:${pwd}/vendor:${GOPATH}
 
 ifndef USE_GCCGO
 	GOBUILD = go build
+	GOTEST = go test -v
 else
-	GOLDFLAGS += $(shell pkg-config --libs gio-2.0 gdk-3.0)
-	GOBUILD = go build -compiler gccgo -gccgoflags "$(GOLDFLAGS)"
+	GOBUILD = gccgo_build.pl -p "gio-2.0 gdk-3.0"
+	GOTEST = echo
 endif
 
 all:  build
@@ -17,7 +18,6 @@ bin/lastore-tools:
 
 build:  bin/lastore-tools
 	${GoPath} ${GOBUILD} -o bin/lastore-daemon lastore-daemon
-	${GoPath} ${GOBUILD} -o bin/lastore-session-helper lastore-session-helper
 	${GoPath} ${GOBUILD} -o bin/lastore-smartmirror lastore-smartmirror || echo "build failed, disable smartmirror support "
 	${GoPath} ${GOBUILD} -o bin/lastore-apt-clean lastore-apt-clean
 	${GoPath} ${GOBUILD} -o bin/deepin-appstore-backend-deb backend-deb
@@ -35,9 +35,9 @@ test:
 			echo 1; \
 		fi; \
 	fi) \
-	${GoPath} go test -v internal/system internal/system/apt \
+	${GoPath} ${GOTEST} internal/system internal/system/apt \
 	internal/utils	internal/querydesktop \
-	lastore-daemon  lastore-session-helper  lastore-smartmirror  lastore-tools
+	lastore-daemon  lastore-smartmirror  lastore-tools
 
 install: gen_mo bin/lastore-tools
 	mkdir -p ${DESTDIR}${PREFIX}/usr/bin && cp bin/* ${DESTDIR}${PREFIX}/usr/bin/

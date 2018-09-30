@@ -61,6 +61,7 @@ type Manager struct {
 	sourceUpdatedOnce bool
 
 	methods *struct {
+		FixError             func() `in:"errType" out:"job"`
 		CleanArchives        func() `out:"job"`
 		CleanJob             func() `in:"jobId"`
 		StartJob             func() `in:"jobId"`
@@ -103,7 +104,6 @@ func NewManager(service *dbusutil.Service, b system.System, c *Config) *Manager 
 	}
 
 	m.jobManager = NewJobManager(service, b, m.updateJobList)
-
 	go m.jobManager.Dispatch()
 
 	m.updateJobList()
@@ -465,14 +465,14 @@ func (m *Manager) SetAutoClean(enable bool) *dbus.Error {
 var errAptRunning = errors.New("apt or apt-get is running")
 
 func (m *Manager) CleanArchives() (dbus.ObjectPath, *dbus.Error) {
-	job, err := m.cleanArchives()
+	job, err := m.cleanArchives(false)
 	if err != nil {
 		return "/", dbusutil.ToError(err)
 	}
 	return job.getPath(), nil
 }
 
-func (m *Manager) cleanArchives() (*Job, error) {
+func (m *Manager) cleanArchives(needNotify bool) (*Job, error) {
 	m.do.Lock()
 	defer m.do.Unlock()
 
@@ -486,7 +486,12 @@ func (m *Manager) cleanArchives() (*Job, error) {
 		return nil, errAptRunning
 	}
 
-	job, err := m.jobManager.CreateJob("", system.CleanJobType, nil, nil)
+	var jobName string
+	if needNotify {
+		jobName = "+notify"
+	}
+
+	job, err := m.jobManager.CreateJob(jobName, system.CleanJobType, nil, nil)
 	if err != nil {
 		log.Warnf("CleanArchives error: %v", err)
 		return nil, err
@@ -515,7 +520,7 @@ func (m *Manager) loopCheck() {
 	doClean := func() {
 		log.Debug("call doClean")
 
-		_, err := m.CleanArchives()
+		_, err := m.cleanArchives(true)
 		if err == errAptRunning {
 			log.Info("apt is running, waiting for the next chance")
 			return
@@ -550,4 +555,38 @@ func (m *Manager) loopCheck() {
 			}
 		}
 	}
+}
+
+func (m *Manager) FixError(sender dbus.Sender, errType string) (dbus.ObjectPath, *dbus.Error) {
+	job, err := m.fixError(sender, errType)
+	if err != nil {
+		return "/", dbusutil.ToError(err)
+	}
+	return job.getPath(), nil
+}
+
+func (m *Manager) fixError(sender dbus.Sender, errType string) (*Job, error) {
+	m.ensureUpdateSourceOnce()
+	environ, err := makeEnvironWithSender(m.service, sender)
+	if err != nil {
+		return nil, err
+	}
+
+	m.do.Lock()
+	defer m.do.Unlock()
+
+	switch errType {
+	case system.ErrTypeDpkgInterrupted, system.ErrTypeDependenciesBroken:
+		// good error type
+	default:
+		return nil, errors.New("invalid error type")
+	}
+
+	job, err := m.jobManager.CreateJob("", system.FixErrorJobType,
+		[]string{errType}, environ)
+	if err != nil {
+		log.Warnf("fixError error: %v", err)
+		return nil, err
+	}
+	return job, err
 }

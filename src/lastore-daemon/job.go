@@ -18,6 +18,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"internal/system"
 	"sync"
@@ -125,11 +126,17 @@ func (j *Job) _UpdateInfo(info system.JobProgressInfo) bool {
 	j.PropsMu.Lock()
 	defer j.PropsMu.Unlock()
 
-	if info.Description != j.Description {
+	if info.Error == nil {
+		if info.Description != j.Description {
+			changed = true
+			j.Description = info.Description
+			j.emitPropChangedDescription(info.Description)
+		}
+	} else {
 		changed = true
-		j.Description = info.Description
-		j.emitPropChangedDescription(info.Description)
+		j.setError(info.Error)
 	}
+
 	if info.Cancelable != j.Cancelable {
 		changed = true
 		j.Cancelable = info.Cancelable
@@ -153,6 +160,10 @@ func (j *Job) _UpdateInfo(info system.JobProgressInfo) bool {
 		j.emitPropChangedSpeed(speed)
 	}
 
+	if info.FatalError {
+		j.retry = 0
+	}
+
 	if info.Status != j.Status {
 		err := TransitionJobState(j, info.Status)
 		if err != nil {
@@ -161,6 +172,7 @@ func (j *Job) _UpdateInfo(info system.JobProgressInfo) bool {
 		}
 		changed = true
 	}
+
 	return changed
 }
 
@@ -178,4 +190,24 @@ func (j *Job) _InitProgressRange(begin, end float64) {
 
 func buildProgress(p, begin, end float64) float64 {
 	return begin + p*(end-begin)
+}
+
+type Error interface {
+	GetType() string
+	GetDetail() string
+}
+
+func (j *Job) setError(e Error) {
+	errValue := struct {
+		ErrType   string
+		ErrDetail string
+	}{
+		e.GetType(), e.GetDetail(),
+	}
+	jsonBytes, err := json.Marshal(errValue)
+	if err != nil {
+		log.Warn(err)
+		return
+	}
+	j.setPropDescription(string(jsonBytes))
 }

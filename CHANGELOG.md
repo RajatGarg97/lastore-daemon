@@ -1,3 +1,98 @@
+<a name="0.9.66.3"></a>
+## 0.9.66.3 (2018-09-13)
+
+
+#### Bug Fixes
+
+*   generate machine-id is same ([79e1b811](https://github.com/linuxdeepin/lastore-daemon/commit/79e1b811cc8811cbdc49c91462911fed9484c97c))
+* **lastore-tools:**  querydesktop deepin-fpapp-org.deepin.flatdeb.deepin-calendar no result ([ad88eec3](https://github.com/linuxdeepin/lastore-daemon/commit/ad88eec34e8da5f082265eab20694935103544ad))
+
+#### Features
+
+* **daemon:**  separate update source and update metadata ([abffdf2b](https://github.com/linuxdeepin/lastore-daemon/commit/abffdf2b079676497b42a57bdce010cd3448d821))
+
+
+
+<a name="0.9.66.2"></a>
+## 0.9.66.2 (2018-08-30)
+
+
+#### Features
+
+*   add Priority set ([ec4dc849](https://github.com/linuxdeepin/lastore-daemon/commit/ec4dc84968a79d805c304862d2bccc9b66461bc3))
+
+
+
+<a name="0.9.66.1"></a>
+### 0.9.66.1 (2018-08-30)
+
+
+#### Bug Fixes
+
+*   after upgrade, click restart bring up an authorization dialog ([0b614b58](https://github.com/linuxdeepin/lastore-daemon/commit/0b614b5865d027d972046d27674e1e05bd9c4a2f))
+
+
+
+<a name="0.9.66"></a>
+### 0.9.66 (2018-08-12)
+
+
+#### Bug Fixes
+
+*   `sw_64` gccgo720 build failed ([388d9199](https://github.com/linuxdeepin/lastore-daemon/commit/388d919910dd7bf8ddc8bf8f6640ba87a3ffddb9))
+* **lastore-tools:**  no check categories api return value structure ([31dbffd3](https://github.com/linuxdeepin/lastore-daemon/commit/31dbffd3a38e8d026f8e4b04b132dc070c0d1d55))
+
+
+
+<a name="0.9.65"></a>
+### 0.9.65 (2018-07-20)
+
+
+
+
+<a name="0.9.64"></a>
+### 0.9.64 (2018-07-19)
+
+
+
+
+<a name="0.9.63"></a>
+### 0.9.63 (2018-07-19)
+
+
+#### Features
+
+*   clean archives from UI do not send notification ([8e642a1d](https://github.com/linuxdeepin/lastore-daemon/commit/8e642a1d499afe453450965a7229ff902669f8dc))
+* **daemon:**  handle more errors ([72660dbc](https://github.com/linuxdeepin/lastore-daemon/commit/72660dbc9eec8d567de8225b38f9a70a9c6f76fb))
+
+#### Bug Fixes
+
+*   PkgSystemError.GetType typo ([7353f307](https://github.com/linuxdeepin/lastore-daemon/commit/7353f307479f5b32867b9edbb50b5b7bfb535a07))
+
+
+
+<a name="0.9.62"></a>
+### 0.9.62 (2018-07-05)
+
+
+#### Features
+
+*   handle package manager system error ([ace591d9](https://github.com/linuxdeepin/lastore-daemon/commit/ace591d938558c76a24bef84f9c90cd615feba49))
+* **backend-deb:**  watch lastore-daemon online/offline ([e750db42](https://github.com/linuxdeepin/lastore-daemon/commit/e750db42a0d7a3018ca492a430e5f06220faafca))
+
+#### Performance
+
+*   reduce CPU usage by remove defer function ([5e30c8aa](https://github.com/linuxdeepin/lastore-daemon/commit/5e30c8aa456c9721bc5f109c74dea1a02e3df093))
+
+#### Bug Fixes
+
+* **daemon:**
+  *  some failed jobs have not been retried ([33d435dd](https://github.com/linuxdeepin/lastore-daemon/commit/33d435dd9455f8b314315c47d80558f554bdb763))
+  *  property JobList occasionally lose job ([4b5f9131](https://github.com/linuxdeepin/lastore-daemon/commit/4b5f913113296d6f8aed7354b79729e3e2680ec1))
+* **session-helper:**  may send failed notification more than once ([d21c537f](https://github.com/linuxdeepin/lastore-daemon/commit/d21c537f3bef8b93a1cd2e323f5bc512aff9f613))
+
+
+
 <a name="0.9.61"></a>
 ### 0.9.61 (2018-06-07)
 

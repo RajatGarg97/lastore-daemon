@@ -14,6 +14,7 @@ import (
 
 	debVersion "github.com/knqyf263/go-deb-version"
 	"github.com/linuxdeepin/go-dbus-factory/com.deepin.lastore"
+	ofdbus "github.com/linuxdeepin/go-dbus-factory/org.freedesktop.dbus"
 	"pkg.deepin.io/lib/dbus1"
 	"pkg.deepin.io/lib/dbusutil"
 )
@@ -34,18 +35,20 @@ type Backend struct {
 	service          *dbusutil.Service
 	sysSigLoop       *dbusutil.SignalLoop
 	lastore          *lastore.Lastore
+	dbusDaemon       *ofdbus.DBus
 	lastoreJobList   []dbus.ObjectPath
 	lastoreJobListMu sync.Mutex
 	jobs             map[dbus.ObjectPath]*Job
 	PropsMu          sync.RWMutex
 	JobList          []dbus.ObjectPath
 	methods          *struct {
-		Install               func() `in:"jobName,id" out:"job"`
-		Remove                func() `in:"jobName,id" out:"job"`
+		Install               func() `in:"localizedName,id" out:"job"`
+		Remove                func() `in:"localizedName,id" out:"job"`
 		ListInstalled         func() `out:"installedInfoList"`
 		QueryVersion          func() `in:"idList" out:"versionInfoList"`
 		QueryDownloadSize     func() `in:"id" out:"size"`
 		QueryInstallationTime func() `in:"idList" out:"installationTimeList"`
+		FixError              func() `in:"errType" out:"job"`
 	}
 }
 
@@ -55,10 +58,12 @@ func newBackend(service *dbusutil.Service) (*Backend, error) {
 		return nil, err
 	}
 	lastoreObj := lastore.NewLastore(systemConn)
+	dbusDaemon := ofdbus.NewDBus(systemConn)
 	sysSigLoop := dbusutil.NewSignalLoop(systemConn, 50)
 	return &Backend{
 		service:    service,
 		lastore:    lastoreObj,
+		dbusDaemon: dbusDaemon,
 		sysSigLoop: sysSigLoop,
 		jobs:       make(map[dbus.ObjectPath]*Job),
 	}, nil
@@ -76,18 +81,55 @@ func (b *Backend) updatePropJobList() {
 	}
 }
 
+func (b *Backend) handleDaemonOnline() {
+	log.Println("lastore-daemon online")
+}
+
+func (b *Backend) handleDaemonOffline() {
+	log.Println("lastore-daemon offline")
+	b.lastoreJobListMu.Lock()
+	b.lastoreJobList = nil
+	b.lastoreJobListMu.Unlock()
+
+	b.PropsMu.Lock()
+	for jobPath, job := range b.jobs {
+		delete(b.jobs, jobPath)
+		job.destroy()
+		err := b.service.StopExport(job)
+		if err != nil {
+			log.Printf("failed to stop export job %s: %v", job.Id, err)
+		}
+	}
+
+	b.JobList = []dbus.ObjectPath{}
+	b.service.EmitPropertyChanged(b, "JobList", b.JobList)
+	b.PropsMu.Unlock()
+}
+
 func (b *Backend) init() {
 	b.sysSigLoop.Start()
+
+	b.dbusDaemon.InitSignalExt(b.sysSigLoop, true)
+	b.dbusDaemon.ConnectNameOwnerChanged(
+		func(name string, oldOwner string, newOwner string) {
+			if name == b.lastore.ServiceName_() {
+				if newOwner == "" {
+					b.handleDaemonOffline()
+				} else {
+					b.handleDaemonOnline()
+				}
+			}
+		})
+
 	b.lastore.InitSignalExt(b.sysSigLoop, true)
 	b.lastore.JobList().ConnectChanged(func(hasValue bool, value []dbus.ObjectPath) {
 		if !hasValue {
 			return
 		}
-		b.lastoreJobListMu.Lock()
-		defer b.lastoreJobListMu.Unlock()
 
 		log.Printf("lastore JobList changed %#v\n", value)
 
+		b.lastoreJobListMu.Lock()
 		var removedJobPaths []dbus.ObjectPath
 		for _, jobPath := range b.lastoreJobList {
 			if !objectPathSliceContains(value, jobPath) {
@@ -95,25 +137,21 @@ func (b *Backend) init() {
 			}
 		}
 		b.lastoreJobList = value
+		b.lastoreJobListMu.Unlock()
+
+		b.PropsMu.Lock()
 		for _, jobPath := range removedJobPaths {
-			b.PropsMu.Lock()
 			job, ok := b.jobs[jobPath]
-			b.PropsMu.Unlock()
 			if ok {
-				b.PropsMu.Lock()
 				delete(b.jobs, jobPath)
 				b.updatePropJobList()
-				b.PropsMu.Unlock()
 
 				log.Println("destroy job", job.core.Path_())
 				job.destroy()
-
-				time.AfterFunc(1*time.Second, func() {
-					log.Println("remove job", job.core.Path_())
-					b.service.StopExport(job)
-				})
+				b.service.StopExport(job)
 			}
 		}
+		b.PropsMu.Unlock()
 	})
 
 	b.lastoreJobListMu.Lock()
@@ -136,6 +174,15 @@ func (*Backend) GetInterfaceName() string {
 
 func (b *Backend) addJob(jobPath dbus.ObjectPath) (dbus.ObjectPath, error) {
 	log.Println("add job", jobPath)
+
+	b.PropsMu.Lock()
+	defer b.PropsMu.Unlock()
+	job, ok := b.jobs[jobPath]
+	if ok {
+		log.Printf("job %s exist", job.Id)
+		return job.getPath(), nil
+	}
+
 	job, err := newJob(b, jobPath)
 	if err != nil {
 		return "/", err
@@ -148,10 +195,8 @@ func (b *Backend) addJob(jobPath dbus.ObjectPath) (dbus.ObjectPath, error) {
 		return "/", err
 	}
 
-	b.PropsMu.Lock()
 	b.jobs[jobPath] = job
 	b.updatePropJobList()
-	b.PropsMu.Unlock()
 	return myJobPath, nil
 }
 
@@ -163,10 +208,10 @@ func (b *Backend) QueryDownloadSize(id string) (int64, *dbus.Error) {
 	return size, nil
 }
 
-func (b *Backend) Install(jobName, id string) (dbus.ObjectPath, *dbus.Error) {
+func (b *Backend) Install(localizedName, id string) (dbus.ObjectPath, *dbus.Error) {
 	b.service.DelayAutoQuit()
-	log.Printf("install %q %q\n", jobName, id)
-	jobPath, err := b.lastore.InstallPackage(0, jobName, id)
+	log.Printf("install %q %q\n", localizedName, id)
+	jobPath, err := b.lastore.InstallPackage(0, localizedName, id)
 	if err != nil {
 		return "/", dbusutil.ToError(err)
 	}
@@ -178,10 +223,25 @@ func (b *Backend) Install(jobName, id string) (dbus.ObjectPath, *dbus.Error) {
 	return myJobPath, nil
 }
 
-func (b *Backend) Remove(jobName, id string) (dbus.ObjectPath, *dbus.Error) {
+func (b *Backend) Remove(localizedName, id string) (dbus.ObjectPath, *dbus.Error) {
 	b.service.DelayAutoQuit()
-	log.Printf("remove %q %q\n", jobName, id)
-	jobPath, err := b.lastore.RemovePackage(0, jobName, id)
+	log.Printf("remove %q %q\n", localizedName, id)
+	jobPath, err := b.lastore.RemovePackage(0, localizedName, id)
+	if err != nil {
+		return "/", dbusutil.ToError(err)
+	}
+
+	myJobPath, err := b.addJob(jobPath)
+	if err != nil {
+		return "/", dbusutil.ToError(err)
+	}
+	return myJobPath, nil
+}
+
+func (b *Backend) FixError(errType string) (dbus.ObjectPath, *dbus.Error) {
+	b.service.DelayAutoQuit()
+	log.Println("fixError", errType)
+	jobPath, err := b.lastore.FixError(0, errType)
 	if err != nil {
 		return "/", dbusutil.ToError(err)
 	}
@@ -382,6 +442,8 @@ func getInstallationTime(id string) (int64, error) {
 }
 
 func (b *Backend) CleanArchives() *dbus.Error {
+	b.service.DelayAutoQuit()
+
 	_, err := b.lastore.CleanArchives(0)
 	return dbusutil.ToError(err)
 }

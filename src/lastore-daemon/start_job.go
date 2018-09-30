@@ -31,10 +31,12 @@ func StartSystemJob(sys system.System, j *Job) error {
 	if j == nil {
 		panic("StartSystemJob with nil")
 	}
-	j.PropsMu.Lock()
-	defer j.PropsMu.Unlock()
 
-	if err := TransitionJobState(j, system.RunningStatus); err != nil {
+	j.PropsMu.Lock()
+	j.setPropDescription("")
+	err := TransitionJobState(j, system.RunningStatus)
+	j.PropsMu.Unlock()
+	if err != nil {
 		return err
 	}
 
@@ -59,6 +61,10 @@ func StartSystemJob(sys system.System, j *Job) error {
 
 	case system.CleanJobType:
 		return sys.Clean(j.Id)
+
+	case system.FixErrorJobType:
+		errType := j.Packages[0]
+		return sys.FixError(j.Id, errType, j.environ)
 	default:
 		return system.NotFoundError("StartSystemJob unknown job type " + j.Type)
 	}

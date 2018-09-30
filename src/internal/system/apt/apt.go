@@ -20,11 +20,13 @@ package apt
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"internal/system"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 
 	log "github.com/cihub/seelog"
@@ -64,13 +66,14 @@ type aptCommand struct {
 	cmdSet CommandSet
 
 	apt      *exec.Cmd
+	aptMu    sync.Mutex
 	exitCode int
 
 	aptPipe *os.File
 
 	indicator system.Indicator
 
-	logger bytes.Buffer
+	stdout bytes.Buffer
 	stderr bytes.Buffer
 }
 
@@ -79,8 +82,8 @@ func (c aptCommand) String() string {
 		c.JobId, c.Cancelable, strings.Join(c.apt.Args, " "))
 }
 
-func createCommandLine(cmdType string, packages []string) *exec.Cmd {
-	var args []string = []string{"-y"}
+func createCommandLine(cmdType string, cmdArgs []string) *exec.Cmd {
+	var args = []string{"-y"}
 
 	options := map[string]string{
 		"APT::Status-Fd": "3",
@@ -99,36 +102,50 @@ func createCommandLine(cmdType string, packages []string) *exec.Cmd {
 	switch cmdType {
 	case system.InstallJobType:
 		args = append(args, "-c", "/var/lib/lastore/apt.conf")
-		args = append(args, "-f", "install")
+		args = append(args, "install")
 		args = append(args, "--")
-		args = append(args, packages...)
+		args = append(args, cmdArgs...)
 	case system.DistUpgradeJobType:
 		args = append(args, "-c", "/var/lib/lastore/apt.conf")
 		args = append(args, "--allow-downgrades", "--allow-change-held-packages")
 		args = append(args, "dist-upgrade")
 	case system.RemoveJobType:
 		args = append(args, "-c", "/var/lib/lastore/apt.conf")
-		args = append(args, "-f", "remove")
+		args = append(args, "autoremove")
 		args = append(args, "--")
-		args = append(args, packages...)
+		args = append(args, cmdArgs...)
 	case system.DownloadJobType:
 		args = append(args, "-c", "/var/lib/lastore/apt.conf")
 		args = append(args, "install", "-d", "--allow-change-held-packages")
 		args = append(args, "--")
-		args = append(args, packages...)
+		args = append(args, cmdArgs...)
 	case system.UpdateSourceJobType:
 		sh := "apt-get -y -o APT::Status-Fd=3 -o Dir::Etc::sourceparts=/var/lib/lastore/source.d update && /var/lib/lastore/scripts/build_system_info -now"
 		return exec.Command("/bin/sh", "-c", sh)
 
 	case system.CleanJobType:
 		return exec.Command("/usr/bin/lastore-apt-clean")
+
+	case system.FixErrorJobType:
+		errType := cmdArgs[0]
+		switch errType {
+		case system.ErrTypeDpkgInterrupted:
+			sh := "dpkg --force-confold --configure -a;" +
+				"apt-get -y -c /var/lib/lastore/apt.conf -f install;"
+			return exec.Command("/bin/sh", "-c", sh)
+		case system.ErrTypeDependenciesBroken:
+			args = append(args, "-c", "/var/lib/lastore/apt.conf")
+			args = append(args, "-f", "install")
+		default:
+			panic("invalid error type " + errType)
+		}
 	}
 
 	return exec.Command("apt-get", args...)
 }
 
-func newAPTCommand(cmdSet CommandSet, jobId string, cmdType string, fn system.Indicator, packages []string) *aptCommand {
-	cmd := createCommandLine(cmdType, packages)
+func newAPTCommand(cmdSet CommandSet, jobId string, cmdType string, fn system.Indicator, cmdArgs []string) *aptCommand {
+	cmd := createCommandLine(cmdType, cmdArgs)
 
 	// See aptCommand.Abort
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -139,7 +156,7 @@ func newAPTCommand(cmdSet CommandSet, jobId string, cmdType string, fn system.In
 		apt:        cmd,
 		Cancelable: true,
 	}
-	cmd.Stdout = &r.logger
+	cmd.Stdout = &r.stdout
 	cmd.Stderr = &r.stderr
 
 	cmdSet.AddCMD(r)
@@ -159,8 +176,6 @@ func (c *aptCommand) setEnv(envVarMap map[string]string) {
 }
 
 func (c *aptCommand) Start() error {
-	c.logger.WriteString(fmt.Sprintf("Begin AptCommand:%v\n", c))
-
 	rr, ww, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("aptCommand.Start pipe : %v", err)
@@ -171,7 +186,9 @@ func (c *aptCommand) Start() error {
 
 	c.apt.ExtraFiles = append(c.apt.ExtraFiles, ww)
 
+	c.aptMu.Lock()
 	err = c.apt.Start()
+	c.aptMu.Unlock()
 	if err != nil {
 		rr.Close()
 		return err
@@ -209,9 +226,8 @@ const (
 func (c *aptCommand) atExit() {
 	c.aptPipe.Close()
 
-	c.logger.WriteString(fmt.Sprintf("End AptCommand: %s\n", c.JobId))
-	log.Info(c.logger.String())
-	log.Info(c.stderr.String())
+	log.Infof("job %s stdout: %s", c.JobId, c.stdout.Bytes())
+	log.Infof("job %s stderr: %s", c.JobId, c.stderr.Bytes())
 
 	c.cmdSet.RemoveCMD(c.JobId)
 
@@ -224,13 +240,13 @@ func (c *aptCommand) atExit() {
 			Cancelable: true,
 		})
 	case ExitFailure:
-		errStr := c.stderr.String()
+		err := parseJobError(c.stderr.String(), c.stdout.String())
 		c.indicator(system.JobProgressInfo{
-			JobId:       c.JobId,
-			Status:      system.FailedStatus,
-			Progress:    -1.0,
-			Cancelable:  true,
-			Description: errStr,
+			JobId:      c.JobId,
+			Status:     system.FailedStatus,
+			Progress:   -1.0,
+			Cancelable: true,
+			Error:      err,
 		})
 	case ExitPause:
 		c.indicator(system.JobProgressInfo{
@@ -242,14 +258,83 @@ func (c *aptCommand) atExit() {
 	}
 }
 
-func (c *aptCommand) indicateFailed(description string) {
-	log.Warn("AptCommand Failed: ", description)
+func parseJobError(stdErrStr string, stdOutStr string) *system.JobError {
+	switch {
+	case strings.Contains(stdErrStr, "Failed to fetch"):
+		return &system.JobError{
+			Type:   "fetchFailed",
+			Detail: stdErrStr,
+		}
+
+	case strings.Contains(stdErrStr, "Sub-process /usr/bin/dpkg"+
+		" returned an error code"):
+		idx := strings.Index(stdOutStr, "\ndpkg:")
+		var detail string
+		if idx == -1 {
+			detail = stdOutStr
+		} else {
+			detail = stdOutStr[idx+1:]
+		}
+
+		return &system.JobError{
+			Type:   "dpkgError",
+			Detail: detail,
+		}
+
+	case strings.Contains(stdErrStr, "Unable to locate package"):
+		return &system.JobError{
+			Type:   "pkgNotFound",
+			Detail: stdErrStr,
+		}
+
+	case strings.Contains(stdErrStr, "Unable to correct problems,"+
+		" you have held broken packages"):
+
+		idx := strings.Index(stdOutStr,
+			"The following packages have unmet dependencies:")
+		var detail string
+		if idx == -1 {
+			detail = stdOutStr
+		} else {
+			detail = stdOutStr[idx:]
+		}
+		return &system.JobError{
+			Type:   "unmetDependencies",
+			Detail: detail,
+		}
+
+	case strings.Contains(stdErrStr, "has no installation candidate"):
+		return &system.JobError{
+			Type:   "noInstallationCandidate",
+			Detail: stdErrStr,
+		}
+
+	case strings.Contains(stdErrStr, "You don't have enough free space"):
+		return &system.JobError{
+			Type:   "insufficientSpace",
+			Detail: stdErrStr,
+		}
+
+	default:
+		return &system.JobError{
+			Type:   "unknown",
+			Detail: stdErrStr,
+		}
+	}
+}
+
+func (c *aptCommand) indicateFailed(errType, errDetail string, isFatalErr bool) {
+	log.Warnf("indicateFailed: type: %s, detail: %s", errType, errDetail)
 	progressInfo := system.JobProgressInfo{
-		JobId:       c.JobId,
-		Progress:    -1.0,
-		Description: description,
-		Status:      system.FailedStatus,
-		Cancelable:  true,
+		JobId:      c.JobId,
+		Progress:   -1.0,
+		Status:     system.FailedStatus,
+		Cancelable: true,
+		Error: &system.JobError{
+			Type:   errType,
+			Detail: errDetail,
+		},
+		FatalError: isFatalErr,
 	}
 	c.cmdSet.RemoveCMD(c.JobId)
 	c.indicator(progressInfo)
@@ -257,6 +342,12 @@ func (c *aptCommand) indicateFailed(description string) {
 
 func (c *aptCommand) Abort() error {
 	if c.Cancelable {
+		c.aptMu.Lock()
+		defer c.aptMu.Unlock()
+		if c.apt.Process == nil {
+			return errors.New("the process has not yet started")
+		}
+
 		log.Tracef("Abort Command: %v\n", c)
 		c.exitCode = ExitPause
 		var err error
